@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "zoye": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/server.js"
+      ],
+      "env": {
+        "ZOYE_API": "https://api.zoye.io"
+      }
+    }
+  }
+}

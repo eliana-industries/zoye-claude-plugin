@@ -1,0 +1,21 @@
+{
+  "name": "zoye",
+  "displayName": "Zoye",
+  "version": "1.9.0",
+  "description": "Lets your Zoye assistant hand work to this Claude Code from the Zoye app, WhatsApp or Slack, and sends Claude's answers back.",
+  "author": {
+    "name": "Zoye",
+    "url": "https://zoye.io",
+    "email": "hello@zoye.io"
+  },
+  "homepage": "https://www.zoye.io/ai-assistant",
+  "repository": "https://github.com/eliana-industries/zoye-claude-plugin",
+  "license": "MIT",
+  "keywords": [
+    "zoye",
+    "channel",
+    "crm",
+    "whatsapp",
+    "slack"
+  ]
+}
