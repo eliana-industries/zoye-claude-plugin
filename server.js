@@ -4,6 +4,7 @@ const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const childProcess = require('child_process');
 
 const API = (process.env.ZOYE_API || '').replace(/\/+$/, '');
 const STATE_DIR = process.env.ZOYE_STATE_DIR || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'channels', 'zoye');
@@ -16,7 +17,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 // Which Claude Code this is: the machine, the folder it was started in, and THIS
 // running session (two terminals in the same folder are two sessions). Zoye lists
 // each by its folder (or the name given with /zoye:name), so "ask the backend one"
@@ -67,6 +68,7 @@ const TOOLS = [
         session_id: { type: 'string', description: 'session_id from the <channel> tag of the request you are answering.' },
         text: { type: 'string', description: 'Your answer, written for a chat.' },
         files: { type: 'array', items: { type: 'string' }, description: 'Optional absolute paths of files to attach (max 10, 25 MB each).' },
+        worked_in: { type: 'string', description: 'If you changed files in a git repository, its absolute folder path (the repo or worktree), so Zoye records which repository and branch the work is on.' },
       },
       required: ['session_id', 'text'],
     },
@@ -96,6 +98,22 @@ const TOOLS = [
   },
 ];
 
+// Which repository and branch the work is on, read with git (nothing is changed).
+// Zoye keeps it with the session, so "which branch did my Claude Code use?" has an
+// answer, and with GitHub connected it finds the pull request for that branch.
+function gitWhere(dir) {
+  const git = function (a) {
+    try { return String(childProcess.execFileSync('git', ['-C', dir].concat(a), { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })).trim(); } catch (e) { return ''; }
+  };
+  const branch = git(['symbolic-ref', '--short', '-q', 'HEAD']);
+  const remote = git(['remote', 'get-url', 'origin']);
+  const m = remote.match(/[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
+  return {
+    repo: m ? m[1] + '/' + m[2] : undefined,
+    branch: branch && branch !== 'HEAD' ? branch.slice(0, 200) : undefined,
+  };
+}
+
 async function callTool(name, args) {
   if (name === 'reply') {
     const files = [];
@@ -107,7 +125,8 @@ async function callTool(name, args) {
         files.push({ name: path.basename(p), base64: fs.readFileSync(p).toString('base64') });
       } catch (e) { log('could not read ' + f + ': ' + e.message); }
     }
-    await api('POST', 'reply', { session_id: Number(args.session_id), text: String(args.text || ''), files: files });
+    const where = gitWhere(args.worked_in ? String(args.worked_in) : PROJECT_DIR);
+    await api('POST', 'reply', { session_id: Number(args.session_id), text: String(args.text || ''), files: files, repo: where.repo, branch: where.branch });
     return 'Sent to the Zoye user.' + (files.length ? ' Attached ' + files.length + ' file(s).' : '');
   }
   if (name === 'connect') {
