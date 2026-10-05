@@ -8,6 +8,10 @@
       "env": {
         "ZOYE_API": "https://api.zoye.io"
       }
+    },
+    "zoye-data": {
+      "type": "http",
+      "url": "https://api.zoye.io/mcp"
     }
   }
 }
