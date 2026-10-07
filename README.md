@@ -10,7 +10,7 @@ Zoye is the AI business assistant small teams run from the Zoye app, WhatsApp an
 
 ## Set it up
 
-1. In Zoye, open Integrations > Claude > Manage Claude via Zoye > Connect my Claude Code, and copy your token (it starts with zcc_).
+1. In Zoye, open Connectors > Claude > Manage Claude via Zoye > Your own Claude Code, and copy your token (it starts with zcc_).
 2. Start Claude Code with the Zoye channel on. Zoye shows the exact command. Until Anthropic adds Zoye to the channel allowlist, it is:
 
     claude --dangerously-load-development-channels plugin:zoye@zoye
