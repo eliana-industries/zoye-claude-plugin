@@ -17,7 +17,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.10.1';
+const VERSION = '1.11.0';
 // Which Claude Code this is: the machine, the folder it was started in, and THIS
 // running session (two terminals in the same folder are two sessions). Zoye lists
 // each by its folder (or the name given with /zoye:name), so "ask the backend one"
@@ -26,6 +26,29 @@ const VERSION = '1.10.1';
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const INSTANCE = os.hostname() + ':' + PROJECT_DIR + '#' + process.ppid;
 let PROJECT = path.basename(PROJECT_DIR) || 'Claude Code';
+// Does this Claude Code LISTEN to Zoye? Only one started with the Zoye channel
+// (--channels / --dangerously-load-development-channels naming zoye) passes a
+// request on to Claude. An editor chat (VS Code, Cursor) loads this plugin too,
+// so it is reported, and Zoye never sends it work (2026-10-07: seven editor chats
+// made a Mac read "Online" while nothing could answer). Read from the command line
+// of the Claude Code that started this process (a few parents up, read only);
+// unknown (no ps, Windows) is reported as nothing, and Zoye trusts it as before.
+function channelOn() {
+  try {
+    let pid = process.ppid;
+    for (let i = 0; i < 4 && pid > 1; i++) {
+      const out = String(childProcess.execFileSync('ps', ['-o', 'ppid=,args=', '-p', String(pid)], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] })).trim();
+      const m = /^(\d+)\s+([\s\S]*)$/.exec(out);
+      if (!m) return undefined;
+      const args = m[2];
+      if (/\bclaude\b/.test(args)) return /--(?:dangerously-load-development-)?channels[\s=][^\n]*zoye/.test(args);
+      pid = Number(m[1]);
+    }
+  } catch (e) { /* no ps: unknown */ }
+  return undefined;
+}
+const LISTENING = channelOn();
+
 let protocolVersion = '2025-06-18';
 const MAX_FILE = 25 * 1024 * 1024;
 const OWN_TOOL = /^mcp__plugin_zoye_zoye__(reply|progress|name)$/;
@@ -168,7 +191,7 @@ async function pollLoop() {
   let said = false;
   for (;;) {
     try {
-      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: PROJECT, dir: PROJECT_DIR }, 60000);
+      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: PROJECT, dir: PROJECT_DIR, listening: LISTENING }, 60000);
       ack = [];
       backoff = 1000;
       if (!said) { log('connected to Zoye'); said = true; }
