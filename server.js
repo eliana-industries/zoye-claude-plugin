@@ -17,7 +17,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.10.0';
+const VERSION = '1.10.1';
 // Which Claude Code this is: the machine, the folder it was started in, and THIS
 // running session (two terminals in the same folder are two sessions). Zoye lists
 // each by its folder (or the name given with /zoye:name), so "ask the backend one"
@@ -75,7 +75,7 @@ const TOOLS = [
   },
   {
     name: 'connect',
-    description: 'Save the Zoye token (starts with zcc_) the user copied from Zoye: Integrations > Claude > Connect my Claude Code, and connect this Claude Code to Zoye. Only when the user gives you a token.',
+    description: 'Save the Zoye token (starts with zcc_) the user copied from Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code, and connect this Claude Code to Zoye. Only when the user gives you a token.',
     inputSchema: {
       type: 'object',
       properties: { token: { type: 'string', description: 'The zcc_ token.' } },
@@ -131,7 +131,7 @@ async function callTool(name, args) {
   }
   if (name === 'connect') {
     const t = String(args.token || '').trim();
-    if (!/^zcc_[A-Za-z0-9_-]{16,}$/.test(t)) throw new Error('That is not a Zoye token. Copy it from Zoye: Integrations > Claude > Connect my Claude Code (it starts with zcc_).');
+    if (!/^zcc_[A-Za-z0-9_-]{16,}$/.test(t)) throw new Error('That is not a Zoye token. Copy it from Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code (it starts with zcc_).');
     const prev = TOKEN;
     TOKEN = t;
     try { await api('POST', 'hello', { client_info: clientInfo() }); } catch (e) { TOKEN = prev; throw e; }
@@ -181,7 +181,7 @@ async function pollLoop() {
         handleEvent(ev);
       }
     } catch (e) {
-      if (/answered 40[13]/.test(e.message)) { log('Zoye refused this token. Create a new one in Zoye: Integrations > Claude, then run /zoye:connect <token>.'); polling = false; return; }
+      if (/answered 40[13]/.test(e.message)) { log('Zoye refused this token. Create a new one in Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code, then run /zoye:connect <token>.'); polling = false; return; }
       log('poll: ' + e.message);
       await new Promise(function (r) { setTimeout(r, backoff); });
       backoff = Math.min(backoff * 2, 30000);
@@ -247,7 +247,7 @@ rl.on('line', async function (line) {
     if (msg.method === 'notifications/initialized') {
       if (!API) { log('Missing Zoye address. Reinstall the plugin.'); return; }
       if (TOKEN) { start(); return; }
-      log('Not connected yet. Copy your token from Zoye: Integrations > Claude, then run /zoye:connect <token>.');
+      log('Not connected yet. Copy your token from Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code, then run /zoye:connect <token>.');
       const wait = setInterval(function () {
         if (started) { clearInterval(wait); return; }
         const t = fileToken();
