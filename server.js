@@ -17,14 +17,28 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.13.0';
-// Team sync (opt-in: ZOYE_TEAM=1 in the environment or in the .env file): the
-// Claude Codes of one Zoye organization see what each other is working on and
-// message each other directly, so nobody forwards screenshots between them.
+const VERSION = '1.14.0';
+// Team sync: the Claude Codes of one Zoye organization see what each other is
+// working on, message each other and share files. Each person turns it on in
+// Zoye (Connectors > Claude > Your own Claude Code); Zoye says which on hello and
+// on every poll, and the tools follow it live (tools/list_changed). ZOYE_TEAM=1
+// (how it was turned on before 1.14) is only reported, so Zoye can carry that
+// opt-in over once; it no longer decides anything here.
 function fileTeam() {
   try { return /^ZOYE_TEAM=(1|true|on)\s*$/im.test(fs.readFileSync(ENV_FILE, 'utf8')); } catch (e) { return false; }
 }
-const TEAM = /^(1|true|on)$/i.test(String(process.env.ZOYE_TEAM || '').trim()) || fileTeam();
+const TEAM_ENV = /^(1|true|on)$/i.test(String(process.env.ZOYE_TEAM || '').trim()) || fileTeam();
+let TEAM = false;
+const TEAM_OFF = 'Team sync is off for you. Turn it on in Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code.';
+// What Zoye said about team sync: tools appear or go away in this session at once.
+function setTeam(on) {
+  if (typeof on !== 'boolean' || on === TEAM) return;
+  TEAM = on;
+  log('team sync ' + (on ? 'on' : 'off'));
+  if (initialized) notify('notifications/tools/list_changed', {});
+  // Switched on: teammates see this Claude Code now, not when the held poll comes back.
+  if (on && TOKEN && API) api('POST', 'status', { instance: INSTANCE, team: teamNow() }).catch(function (e) { log('team status: ' + e.message); });
+}
 let STATUS = '';
 let WORK_DIR = '';
 // Which Claude Code this is: the machine, the folder it was started in, and THIS
@@ -59,6 +73,7 @@ function channelOn() {
 const LISTENING = channelOn();
 
 let protocolVersion = '2025-06-18';
+let initialized = false;
 const MAX_FILE = 25 * 1024 * 1024;
 // All files of one message together: base64 grows them by a third and Zoye takes 70 MB a request.
 const MAX_TOTAL = 50 * 1024 * 1024;
@@ -83,7 +98,7 @@ async function api(method, p, body, timeoutMs) {
   return json;
 }
 
-const INSTRUCTIONS = [
+function instructions() { return [
   'Messages from Zoye arrive as <channel source="zoye" session_id="..." turn_id="..." title="...">. Each one is a request from the Zoye user (the person who owns this Claude Code), relayed by their Zoye assistant from in-app chat, WhatsApp or Slack.',
   'Do the work here, in this session, with your own tools, exactly as if they had typed it.',
   'The person is NOT at this computer: they are in the Zoye app, WhatsApp or Slack. Text you write in this terminal never reaches them. Your answer reaches them ONLY through the reply tool.',
@@ -98,9 +113,11 @@ const INSTRUCTIONS = [
   'Messages you send are read by another Claude: make each one stand on its own (repo, branch, commit or PR, the exact question). Never put secrets in them.',
   'To share a file (a plan, a doc, a log, a screenshot), attach it to send with files: ["/absolute/path"] instead of pasting it. The teammate is also told in Zoye (app, WhatsApp or Slack), so they see it even away from the terminal. If their Claude Code is not open, send to their name and it reaches them in Zoye.',
   'A teammate message can carry files: text files are shown in full, every file has a download command (the link works for 24 hours). Save a file only where your user wants it; ask if unsure.',
-] : []).join('\n');
+] : [
+  'Team sync (teammates\' Claude Codes seeing what each other works on, messaging and sharing files) is off for this person. If they ask about it: ' + TEAM_OFF,
+]).join('\n'); }
 
-const TOOLS = [
+function tools() { return [
   {
     name: 'reply',
     description: 'Send your answer back to the Zoye user who asked (it reaches them on the channel they used). Pass the session_id from the <channel> tag.',
@@ -169,7 +186,7 @@ const TOOLS = [
       required: ['to'],
     },
   },
-] : []);
+] : []); }
 
 // Which repository and branch the work is on, read with git (nothing is changed).
 // Zoye keeps it with the session, so "which branch did my Claude Code use?" has an
@@ -241,7 +258,9 @@ async function callTool(name, args) {
     if (!/^zcc_[A-Za-z0-9_-]{16,}$/.test(t)) throw new Error('That is not a Zoye token. Copy it from Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code (it starts with zcc_).');
     const prev = TOKEN;
     TOKEN = t;
-    try { await api('POST', 'hello', { client_info: clientInfo() }); } catch (e) { TOKEN = prev; throw e; }
+    let h;
+    try { h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }); } catch (e) { TOKEN = prev; throw e; }
+    setTeam(h && h.team);
     fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
     // Keep the file's other lines (ZOYE_TEAM=1): only the token is replaced.
     let rest = '';
@@ -262,10 +281,12 @@ async function callTool(name, args) {
     await api('POST', 'progress', { session_id: Number(args.session_id), label: String(args.label || '') });
     return 'ok';
   }
+  if (!TEAM && (name === 'status' || name === 'team' || name === 'send')) throw new Error(TEAM_OFF);
   if (TEAM && name === 'status') {
     STATUS = String(args.text || '').replace(/\s+/g, ' ').trim().slice(0, 300);
     if (args.worked_in) WORK_DIR = path.resolve(String(args.worked_in));
-    await api('POST', 'status', { instance: INSTANCE, team: teamNow() });
+    const r = await api('POST', 'status', { instance: INSTANCE, team: teamNow() });
+    if (r && r.team === false) { setTeam(false); throw new Error(TEAM_OFF); }
     return 'Teammates now see: ' + (STATUS || '(nothing)');
   }
   if (TEAM && name === 'team') {
@@ -298,13 +319,17 @@ let polling = false;
 const SEEN = new Set();
 async function pollLoop() {
   if (polling) return; polling = true;
+  // The first poll says whether this Claude Code shares with the team: know it first
+  // (initialize and initialized can be handled at the same time).
+  await teamAtStart();
   let ack = [];
   let backoff = 1000;
   let said = false;
   for (;;) {
     try {
-      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: PROJECT, dir: PROJECT_DIR, listening: LISTENING, team: TEAM ? teamNow() : undefined }, 60000);
+      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: PROJECT, dir: PROJECT_DIR, listening: LISTENING, team: TEAM ? teamNow() : undefined, team_env: TEAM_ENV }, 60000);
       ack = [];
+      setTeam(r && r.team);
       backoff = 1000;
       if (!said) { log('connected to Zoye'); said = true; }
       for (const ev of (r && r.events) || []) {
@@ -374,7 +399,19 @@ function missingOwnToolRules() {
 
 function clientInfo() { return os.hostname().slice(0, 60) + ' / zoye-channel ' + VERSION; }
 async function heartbeat() {
-  try { await api('POST', 'hello', { client_info: clientInfo() }); } catch (e) { log('heartbeat: ' + e.message); }
+  try { const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }); setTeam(h && h.team); } catch (e) { log('heartbeat: ' + e.message); }
+}
+// Before answering initialize: ask Zoye whether team sync is on, so the first
+// tools and instructions Claude Code reads are right. At most 3 s; on no answer it
+// starts with team sync off and the first poll turns it on.
+let teamChecked = null;
+function teamAtStart() {
+  if (!teamChecked) teamChecked = checkTeam();
+  return teamChecked;
+}
+async function checkTeam() {
+  if (!TOKEN || !API) return;
+  try { const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }, 3000); if (h && typeof h.team === 'boolean') TEAM = h.team; } catch (e) { log('team check: ' + e.message); }
 }
 function start() {
   started = true;
@@ -390,15 +427,17 @@ rl.on('line', async function (line) {
   try {
     if (msg.method === 'initialize') {
       if (msg.params && msg.params.protocolVersion) protocolVersion = msg.params.protocolVersion;
+      await teamAtStart();
       result(id, {
         protocolVersion: protocolVersion,
-        capabilities: { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
+        capabilities: { tools: { listChanged: true }, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
         serverInfo: { name: 'zoye', version: VERSION },
-        instructions: INSTRUCTIONS,
+        instructions: instructions(),
       });
       return;
     }
     if (msg.method === 'notifications/initialized') {
+      initialized = true;
       if (!API) { log('Missing Zoye address. Reinstall the plugin.'); return; }
       if (TOKEN) { start(); return; }
       log('Not connected yet. Copy your token from Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code, then run /zoye:connect <token>.');
@@ -422,7 +461,7 @@ rl.on('line', async function (line) {
       return;
     }
     if (msg.method === 'ping') { result(id, {}); return; }
-    if (msg.method === 'tools/list') { result(id, { tools: TOOLS }); return; }
+    if (msg.method === 'tools/list') { result(id, { tools: tools() }); return; }
     if (msg.method === 'tools/call') {
       const p = msg.params || {};
       try {
