@@ -10,4 +10,4 @@ allowed-tools:
 
 Arguments: $ARGUMENTS
 
-Call the zoye name tool with the arguments as the name, then tell the user in one line what Zoye now calls this session.
+Call the zoye name tool with the arguments as the name, then tell the user in one line what Zoye now calls this session, and pass on any advice in the result.
