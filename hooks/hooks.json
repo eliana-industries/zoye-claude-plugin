@@ -20,6 +20,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hook.js\"",
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }

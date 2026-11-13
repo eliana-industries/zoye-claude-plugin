@@ -18,7 +18,14 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.17.0';
+const VERSION = '1.18.0';
+// The newest plugin version Zoye serves (said on hello): an older session tells its user once.
+let LATEST = '';
+function newer(a, b) {
+  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
+  return false;
+}
 // Team sync: the Claude Codes of one Zoye organization see what each other is
 // working on, message each other and share files. Each person turns it on in
 // Zoye (Connectors > Claude > Your own Claude Code); Zoye says which on hello and
@@ -30,11 +37,17 @@ function fileTeam() {
 }
 const TEAM_ENV = /^(1|true|on)$/i.test(String(process.env.ZOYE_TEAM || '').trim()) || fileTeam();
 let TEAM = false;
-const TEAM_OFF = 'Team sync is off for you. Turn it on in Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code.';
+// The hook keeps the start of the user's request only while team sync is on: this file tells it (1.18).
+const TEAM_FILE = path.join(STATE_DIR, 'team-sync');
+function markTeam() {
+  try { fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 }); fs.writeFileSync(TEAM_FILE, TEAM ? '1' : '0', { mode: 0o600 }); } catch (e) { log('team marker: ' + e.message); } // silent-ok - without the marker the hook keeps no request text, so nothing is compared; the status tool still works
+}
+const TEAM_OFF ='Team sync is off for you. Turn it on in Zoye: Connectors > Claude > Manage Claude via Zoye > Your own Claude Code.';
 // What Zoye said about team sync: tools appear or go away in this session at once.
 function setTeam(on) {
   if (typeof on !== 'boolean' || on === TEAM) return;
   TEAM = on;
+  markTeam();
   log('team sync ' + (on ? 'on' : 'off'));
   if (initialized) notify('notifications/tools/list_changed', {});
   // Switched on: teammates see this Claude Code now, not when the held poll comes back.
@@ -103,7 +116,7 @@ function sessionSaved() {
     const reg = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'sessions', process.ppid + '.json'), 'utf8'));
     const id = String(reg.sessionId || '').replace(/[^A-Za-z0-9-]/g, '');
     const saved = id ? JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'sessions', id + '.json'), 'utf8')) : {};
-    return { socket: String(saved.socket || reg.messagingSocketPath || ''), token: String(saved.token || ''), at: Number(saved.at) || 0 };
+    return { socket: String(saved.socket || reg.messagingSocketPath || ''), token: String(saved.token || ''), at: Number(saved.at) || 0, prompt: String(saved.prompt || ''), promptAt: Number(saved.promptAt) || 0 };
   } catch (e) { return null; }
 }
 function inbox() {
@@ -157,10 +170,13 @@ function instructions() { return [
   'So EVERY request gets exactly one reply call with the SAME session_id, even a one-line answer, a poem or "done". The text is read in a chat, often on a phone: lead with the answer and keep it short. Attach any file you made with files: ["/absolute/path"].',
   'For long work you may call progress with a few words ("Running the tests") so the user sees you are on it.',
   'If a message says STOP, stop the current task and reply with one line saying what was done so far.',
-].concat(TEAM ? [
+].concat(LATEST && newer(LATEST, VERSION) ? [
+  'This session runs Zoye plugin ' + VERSION + ' and ' + LATEST + ' is out. Tell your user once, in one line. With their OK run in a shell: claude plugin marketplace update zoye, then claude plugin update zoye@zoye (new sessions get it).' + (autoUpdateOn() ? '' : ' If they want Zoye plugin updates to install automatically from now on, with their OK ' + AUTO_UPDATE_HOW),
+] : []).concat(TEAM ? [
   'TEAM SYNC is on: your teammates\' Claude Codes in the same Zoye organization can see what you are working on and message you.',
   'At the start of a session, before the first piece of work, call team once and tell your user in one line who is online and any overlap (nobody online and no overlap: say nothing).',
   'When you start a piece of work, call status with one line ("fixing the pricing page footer") and worked_in = the repo folder; call it again when the work changes. Teammates see it, plus the branch and changed files, live. If status answers LIKE YOURS, a teammate is on similar work: tell your user who and what, and ask before going on.',
+  'Zoye also compares what your user asks you with teammates\' work automatically. A message that starts with TEAM SYNC and names a teammate on similar work comes from Zoye, not from the person at this computer: tell your user who is on it and what, and ask before going on.',
   'Before editing a repo a teammate may also be in, call team: it lists who is in which repo and branch, and any file both of you have changed (overlap). Tell your user about an overlap before editing those files.',
   'Message a teammate with send only when the work needs it, without waiting to be told: an overlap, or a change to a file, API, schema or branch they are working on; a question only they can answer or a decision that is theirs; work they are waiting for that you just finished or pushed; or your user hands them a task ("give this to Dana", "ask Sam"), and then send everything they need to start: repo, branch or PR, what is done, what is left, the exact ask, files attached. Send to a person by name; Zoye picks their session. Not for chat, progress or thanks: your status line already shows what you are doing.',
   'When you need a teammate\'s answer, tell your user you asked and go on with what does not depend on it; never wait or poll for the answer, it arrives as a message.',
@@ -273,6 +289,38 @@ function teamNow() {
   return { status: STATUS, repo: where.repo || '', branch: where.branch || '', head: git(['log', '-1', '--format=%h %s']).trim().slice(0, 200), changed: changed, inbox: !!box, active_at: box ? box.at : 0 };
 }
 
+// Teammates on similar work, as Zoye answered a status: one LIKE YOURS line each.
+function likeLines(r) {
+  return ((r && r.similar) || []).map(function (s) {
+    const ago = s.agoSec < 120 ? 'just now' : s.agoSec < 7200 ? Math.round(s.agoSec / 60) + 'm ago' : Math.round(s.agoSec / 3600) + 'h ago';
+    return '\nLIKE YOURS: ' + s.who + ' / ' + s.project + ': "' + s.status + '"' + (s.repo ? ' (' + s.repo + (s.branch ? ' @ ' + s.branch : '') + ', ' + ago + '; ' + s.why.join('; ') + ')' : ' (' + ago + '; ' + s.why.join('; ') + ')');
+  }).join('');
+}
+
+// 1.18: nobody has to call status for two people to learn they are building the same
+// thing. The hook keeps the start of what the user just asked (team sync on only); this
+// reports a new one to Zoye, which compares it with teammates' lines of the last 24 h.
+// On a match Zoye tells the teammate, and this session gets one note. No match: nothing.
+let AUTO_AT = 0;
+let AUTO_TEXT = '';
+async function autoReport() {
+  if (!TEAM || !TOKEN || !API) return;
+  const saved = sessionSaved();
+  if (!saved || !saved.prompt || saved.promptAt <= AUTO_AT || saved.prompt === AUTO_TEXT) return;
+  AUTO_AT = saved.promptAt;
+  AUTO_TEXT = saved.prompt;
+  try {
+    const r = await api('POST', 'status', { instance: INSTANCE, auto: true, team: Object.assign(teamNow(), { status: saved.prompt }) });
+    const like = likeLines(r);
+    if (!like) return;
+    const content = 'TEAM SYNC (from Zoye, not from the person at this computer): a teammate is already on work like what you were just asked.' + like
+      + '\nThey were told too. Tell your user who is on it and ask before going on.';
+    const box = LISTENING === true ? null : inbox();
+    if (box) { inboxPost(box, content).then(function (ok) { if (!ok) log('a team sync note could not reach this session'); }); return; }
+    notify('notifications/claude/channel', { content: content, meta: { from: 'Zoye team sync' } });
+  } catch (e) { log('auto status: ' + e.message); } // silent-ok - the comparison is an extra; the session goes on and the next request is compared again
+}
+
 function peerLine(p) {
   const ago = typeof p.activeSec === 'number' ? (p.activeSec < 120 ? p.activeSec + 's' : Math.round(p.activeSec / 60) + 'm') + ' ago' : '';
   return '- ' + p.who + ' / ' + p.project + ' (' + p.computer + ') id ' + p.id + (ago ? ', last answer ' + ago : '')
@@ -328,6 +376,7 @@ async function callTool(name, args) {
     const missing = missingOwnToolRules();
     start();
     return 'Connected. Zoye now shows this Claude Code as Online. The token is saved in ' + ENV_FILE + ', so next time just start Claude Code with the channel on.'
+      + (autoUpdateOn() ? '' : ' AUTO_UPDATE_OFF.')
       + (missing.length ? ' NOT_YET_ALLOWED: ' + missing.join(', ') : '');
   }
   if (name === 'name') {
@@ -355,10 +404,7 @@ async function callTool(name, args) {
     if (args.worked_in) WORK_DIR = path.resolve(String(args.worked_in));
     const r = await api('POST', 'status', { instance: INSTANCE, team: teamNow() });
     if (r && r.team === false) { setTeam(false); throw new Error(TEAM_OFF); }
-    const like = ((r && r.similar) || []).map(function (s) {
-      const ago = s.agoSec < 120 ? 'just now' : s.agoSec < 7200 ? Math.round(s.agoSec / 60) + 'm ago' : Math.round(s.agoSec / 3600) + 'h ago';
-      return '\nLIKE YOURS: ' + s.who + ' / ' + s.project + ': "' + s.status + '"' + (s.repo ? ' (' + s.repo + (s.branch ? ' @ ' + s.branch : '') + ', ' + ago + '; ' + s.why.join('; ') + ')' : ' (' + ago + '; ' + s.why.join('; ') + ')');
-    }).join('');
+    const like = likeLines(r);
     return 'Teammates now see: ' + (STATUS || '(nothing)') + (like ? like + '\nThey were told too. Tell your user who is on it and ask before going on.' : '');
   }
   if (TEAM && name === 'team') {
@@ -472,9 +518,19 @@ function missingOwnToolRules() {
   } catch (e) { return OWN_TOOL_RULES.slice(); }
 }
 
+// Does Claude Code update this plugin automatically (1.18)? Read only: the zoye marketplace's own
+// autoUpdate flag, in the user's settings or in Claude Code's list of marketplaces. The plugin
+// never changes settings: /zoye:connect asks the user and adds the flag only on a yes.
+const AUTO_UPDATE_HOW = 'set "autoUpdate": true on the zoye entry under extraKnownMarketplaces in ~/.claude/settings.json (if there is no such entry, add "zoye": {"source": {"source": "url", "url": "' + API + '/api/claude-bridge/plugin/marketplace.json"}, "autoUpdate": true}), keeping everything else in the file and the JSON valid.';
+function autoUpdateOn() {
+  const flag = function (file, pick) { try { return pick(JSON.parse(fs.readFileSync(file, 'utf8'))) === true; } catch (e) { return false; } }; // silent-ok - an unreadable file reads as "not on": the user is then only asked whether to turn it on
+  return flag(path.join(CLAUDE_DIR, 'settings.json'), function (s) { return ((s.extraKnownMarketplaces || {}).zoye || {}).autoUpdate; })
+    || flag(path.join(CLAUDE_DIR, 'plugins', 'known_marketplaces.json'), function (m) { return (m.zoye || {}).autoUpdate; });
+}
+
 function clientInfo() { return os.hostname().slice(0, 60) + ' / zoye-channel ' + VERSION; }
 async function heartbeat() {
-  try { const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }); setTeam(h && h.team); } catch (e) { log('heartbeat: ' + e.message); }
+  try { const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }); if (h && typeof h.latest === 'string') LATEST = h.latest; setTeam(h && h.team); } catch (e) { log('heartbeat: ' + e.message); }
 }
 // Before answering initialize: ask Zoye whether team sync is on, so the first
 // tools and instructions Claude Code reads are right. At most 3 s; on no answer it
@@ -486,12 +542,19 @@ function teamAtStart() {
 }
 async function checkTeam() {
   if (!TOKEN || !API) return;
-  try { const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }, 3000); if (h && typeof h.team === 'boolean') TEAM = h.team; } catch (e) { log('team check: ' + e.message); }
+  try {
+    const h = await api('POST', 'hello', { client_info: clientInfo(), team_env: TEAM_ENV }, 3000);
+    if (h && typeof h.latest === 'string') LATEST = h.latest;
+    if (h && typeof h.team === 'boolean') { TEAM = h.team; markTeam(); }
+  } catch (e) { log('team check: ' + e.message); }
 }
+let autoTimer = null;
 function start() {
   started = true;
   heartbeat(); // records which machine this is; every poll keeps it Online
   pollLoop();
+  // What the user asks is compared with teammates' work without a tool call (see autoReport).
+  if (!autoTimer) autoTimer = setInterval(autoReport, Number(process.env.ZOYE_AUTO_MS) || 15000);
 }
 
 // ── JSON-RPC over stdio ─────────────────────────────────────────────────────
