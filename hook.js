@@ -29,9 +29,19 @@ process.stdin.on('end', function () {
     if (asked) {
       let team = false;
       try { team = fs.readFileSync(path.join(state, 'team-sync'), 'utf8').trim() === '1'; } catch (e) { team = false; } // silent-ok - no marker means team sync is off: no request text is kept
-      const p = String(input.prompt || '').replace(/\s+/g, ' ').trim();
-      // A real request only: not a slash command, not "ok" or "continue".
-      if (team && p.length >= 30 && p.charAt(0) !== '/') { next.prompt = p.slice(0, 200); next.promptAt = Date.now(); }
+      // Claude Code puts its own blocks in front of what the person typed (a system reminder, the
+      // browser instructions, a pasted block), and the plugin's own notes arrive as requests too.
+      // None of that is the request (seen live 2026-11-14: two people matched on the same block).
+      let p = String(input.prompt || '');
+      for (let i = 0; i < 30; i++) {
+        const m = /^\s*<([A-Za-z][\w-]*)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/.exec(p);
+        if (!m) break;
+        p = p.slice(m[0].length);
+      }
+      p = p.replace(/\s+/g, ' ').trim();
+      const own = /^TEAM SYNC \(from Zoye/.test(p) || /^From .{1,180}\(a teammate's Claude Code/.test(p);
+      // A real request only: not a slash command, not "ok" or "continue", not a leftover tag.
+      if (team && !own && p.length >= 30 && p.charAt(0) !== '/' && p.charAt(0) !== '<') { next.prompt = p.slice(0, 200); next.promptAt = Date.now(); }
       if (!team) { next.prompt = ''; next.promptAt = 0; }
     }
     fs.writeFileSync(file, JSON.stringify(next), { mode: 0o600 });

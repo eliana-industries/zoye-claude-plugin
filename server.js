@@ -18,7 +18,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.18.0';
+const VERSION = '1.18.1';
 // The newest plugin version Zoye serves (said on hello): an older session tells its user once.
 let LATEST = '';
 function newer(a, b) {
