@@ -18,7 +18,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.18.1';
+const VERSION = '1.19.0';
 // The newest plugin version Zoye serves (said on hello): an older session tells its user once.
 let LATEST = '';
 function newer(a, b) {
@@ -62,11 +62,12 @@ let WORK_DIR = '';
 // parent folder (one that sees every project inside it) can be left to decide.
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const INSTANCE = os.hostname() + ':' + PROJECT_DIR + '#' + process.ppid;
-// A name given with /zoye:name is kept per folder (1.17), so a session opened again
-// there keeps it: a session named "team" in its own folder takes teammates' messages.
+// A name given with /zoye:name is kept (1.17), so a session opened again keeps it: a
+// session named "team" takes teammates' messages. A terminal keeps it per FOLDER. An
+// editor (VS Code, Cursor) runs many chats in one folder, so there it is kept per
+// CONVERSATION (1.19): naming one chat "team" must not name them all. See project().
 const NAMES_FILE = path.join(STATE_DIR, 'names.json');
 function savedNames() { try { const n = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')); return n && typeof n === 'object' ? n : {}; } catch (e) { return {}; } } // silent-ok - no names file yet: the folder name is used
-let PROJECT = (typeof savedNames()[PROJECT_DIR] === 'string' && savedNames()[PROJECT_DIR]) || path.basename(PROJECT_DIR) || 'Claude Code';
 // Does this Claude Code LISTEN to Zoye? Only one started with the Zoye channel
 // (--channels / --dangerously-load-development-channels naming zoye) passes a
 // request on to Claude. An editor chat (VS Code, Cursor) loads this plugin too,
@@ -118,6 +119,27 @@ function sessionSaved() {
     const saved = id ? JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'sessions', id + '.json'), 'utf8')) : {};
     return { socket: String(saved.socket || reg.messagingSocketPath || ''), token: String(saved.token || ''), at: Number(saved.at) || 0, prompt: String(saved.prompt || ''), promptAt: Number(saved.promptAt) || 0 };
   } catch (e) { return null; }
+}
+// Which conversation this is, when a name belongs to the conversation: Claude Code's
+// registry says what started this session. A terminal ("cli") answers '', so its name
+// stays with the folder, as before 1.19.
+function chat() {
+  try {
+    const reg = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, 'sessions', process.ppid + '.json'), 'utf8'));
+    const id = String(reg.sessionId || '').replace(/[^A-Za-z0-9-]/g, '');
+    return id && reg.entrypoint && reg.entrypoint !== 'cli' ? id : '';
+  } catch (e) { return ''; } // silent-ok - no registry entry (an older Claude Code): the name is kept per folder
+}
+// The name given in this run, with the conversation it was given in: a new conversation
+// in the same window (/clear) does not inherit it.
+let NAMED = null;
+function project() {
+  const id = chat();
+  if (NAMED && NAMED.id === id) return NAMED.name;
+  const all = savedNames();
+  const mine = id && all.chats && all.chats[id];
+  if (mine && typeof mine.name === 'string' && mine.name) return mine.name;
+  return (typeof all[PROJECT_DIR] === 'string' && all[PROJECT_DIR]) || path.basename(PROJECT_DIR) || 'Claude Code';
 }
 function inbox() {
   const saved = sessionSaved();
@@ -382,16 +404,29 @@ async function callTool(name, args) {
   if (name === 'name') {
     const n = String(args.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
     if (!n) throw new Error('Give the session a name, for example: /zoye:name pricing');
-    PROJECT = n;
+    const id = chat();
+    NAMED = { id: id, name: n };
     let kept = '';
     try {
       const all = savedNames();
-      all[PROJECT_DIR] = n;
+      if (id) {
+        // One conversation per folder holds a name: given again, it moves here.
+        const chats = all.chats && typeof all.chats === 'object' ? all.chats : {};
+        for (const k of Object.keys(chats)) {
+          if (chats[k] && chats[k].dir === PROJECT_DIR && String(chats[k].name || '').toLowerCase() === n.toLowerCase()) delete chats[k];
+        }
+        chats[id] = { name: n, dir: PROJECT_DIR };
+        all.chats = chats;
+      } else {
+        all[PROJECT_DIR] = n;
+      }
       fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
       fs.writeFileSync(NAMES_FILE, JSON.stringify(all, null, 2), { mode: 0o600 });
-      kept = ' Every new session started in ' + PROJECT_DIR + ' gets this name too.';
-    } catch (e) { log('names: ' + e.message); } // silent-ok - the name still applies to this session; the result then omits "gets this name too"
-    const team = n.toLowerCase() === 'team' ? ' Teammates\' messages and alerts now come to this session first: keep it open, use it only for team traffic, and give it a folder of its own.' : '';
+      kept = id
+        ? ' The name stays with this conversation, also after a restart. Other chats in this folder keep their own.'
+        : ' Every new session started in ' + PROJECT_DIR + ' gets this name too.';
+    } catch (e) { log('names: ' + e.message); } // silent-ok - the name still applies to this session; the result then omits that it is kept
+    const team = n.toLowerCase() === 'team' ? ' Teammates\' messages and alerts now come to this session first: keep it open and use it only for team traffic' + (id ? '.' : ', and give it a folder of its own.') : '';
     return 'Done. In Zoye this session is now called "' + n + '".' + kept + team;
   }
   if (name === 'progress') {
@@ -445,7 +480,7 @@ async function pollLoop() {
   let said = false;
   for (;;) {
     try {
-      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: PROJECT, dir: PROJECT_DIR, listening: LISTENING, team: TEAM ? teamNow() : undefined, team_env: TEAM_ENV }, 60000);
+      const r = await api('POST', 'poll', { ack: ack, instance: INSTANCE, project: project(), dir: PROJECT_DIR, listening: LISTENING, team: TEAM ? teamNow() : undefined, team_env: TEAM_ENV }, 60000);
       ack = [];
       setTeam(r && r.team);
       backoff = 1000;
