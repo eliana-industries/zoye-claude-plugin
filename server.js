@@ -21,7 +21,7 @@ function fileToken() {
 }
 let TOKEN = (process.env.ZOYE_TOKEN || '').trim() || fileToken();
 let started = false;
-const VERSION = '1.22.1';
+const VERSION = '1.22.2';
 // The newest plugin version Zoye serves (said on hello): an older session tells its user once.
 let LATEST = '';
 function newer(a, b) {
@@ -597,8 +597,44 @@ function editorInfo() {
     const name = String(product.applicationName || '');
     const cli = /^[a-z0-9][a-z0-9._-]{0,40}$/i.test(name) ? path.join(appRoot, 'bin', name + (PLATFORM === 'win32' ? '.cmd' : '')) : '';
     if (cli && fs.existsSync(cli)) out.cli = cli;
-  } catch (e) { /* not found: the plain VS Code link, no launcher */ } // silent-ok - falls back to the vscode link, which VS Code answers
+    // 1.22.2: where the editor keeps its open windows' folders (its user data folder is named nameShort: Code, Cursor...).
+    const short = String(product.nameShort || '');
+    const data = process.env.VSCODE_PORTABLE ? path.join(process.env.VSCODE_PORTABLE, 'user-data')
+      : !/^[\w .+-]{1,40}$/.test(short) ? ''
+      : PLATFORM === 'win32' ? (process.env.APPDATA ? path.join(process.env.APPDATA, short) : '')
+      : PLATFORM === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support', short)
+      : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), short);
+    if (data) out.storage = path.join(data, 'User', 'globalStorage', 'storage.json');
+  } catch (e) { /* not found: no launcher, so no window is known and nothing opens */ } // silent-ok - the answer waits for the next session
   return out;
+}
+// 1.22.2 (Alex 2026-11-22): the chat goes ONLY to a window already open on that folder (or on a folder holding it),
+// never a new window: a new window of a folder the editor has not trusted runs in Restricted Mode, without Claude.
+// The editor lists its windows' folders as full paths in storage.json (written when a window opens, not when one
+// closes), so "<launcher> --status", which answers from the running editor, confirms the window is still open.
+function editorFolders(ed) {
+  try {
+    const w = JSON.parse(fs.readFileSync(ed.storage, 'utf8')).windowsState || {};
+    return [w.lastActiveWindow].concat(w.openedWindows || []).map(function (x) {
+      try { return x && x.folder ? require('url').fileURLToPath(x.folder) : ''; } catch (e) { return ''; } // silent-ok - a remote window has no folder on this computer
+    }).filter(Boolean);
+  } catch (e) { return []; } // silent-ok - no list: no window is known to be open, so nothing opens
+}
+function windowFor(ed, dir, cb) {
+  const norm = function (p) { return (PLATFORM === 'win32' ? p.toLowerCase() : p).replace(/[\\/]+$/, ''); };
+  const d = norm(dir);
+  const found = editorFolders(ed).filter(function (f) { const n = norm(f); return d === n || d.indexOf(n + path.sep) === 0; })
+    .sort(function (a, b) { return b.length - a.length; });
+  if (!found.length || !ed.cli) return cb(null);
+  const done = function (e, out) {
+    const live = {};
+    String(out || '').replace(/Folder \((.+?)\):/g, function (m, n) { live[n] = true; return m; });
+    // ponytail: --status names a window by its folder's NAME; two open windows on same-named folders in different places could mix
+    cb(found.find(function (f) { return live[path.basename(f)]; }) || null);
+  };
+  const opts = { timeout: 20000, windowsHide: true };
+  if (PLATFORM === 'win32') childProcess.execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', '""' + ed.cli + '" --status"'], Object.assign({ windowsVerbatimArguments: true }, opts), done);
+  else childProcess.execFile(ed.cli, ['--status'], opts, done);
 }
 const FOLDER_WAIT_MS = Number(process.env.ZOYE_FOLDER_WAIT_MS || 2500);
 function onPath(cmd) {
@@ -611,16 +647,14 @@ function openPlan(dir) {
   if (ed) {
     // A new chat tab in the editor with the prompt typed in; the person presses Enter (an editor link never sends by itself).
     // 1.22.1: the link carries no folder, so the chat lands in the window used last (2026-11-20: an answer for a
-    // Zoye session opened in the SimilarTours window). The editor's own launcher first brings up THAT folder's
-    // window (an open one is focused, else a new one opens), then the link opens the chat there.
+    // Zoye session opened in the SimilarTours window). The editor's own launcher first brings THAT folder's open
+    // window to the front (openSession finds it; 1.22.2: none open, nothing opens), then the link opens the chat there.
+    if (!ed.cli || !ed.storage) return { none: 'this editor does not say which windows are open' };
     const uri = ed.scheme + '://anthropic.claude-code/open?prompt=' + encodeURIComponent(OPEN_PROMPT);
-    const folder = !ed.cli ? null : PLATFORM === 'win32'
-      ? { cmd: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', '""' + ed.cli + '" "' + dir + '""'], opts: Object.assign({ windowsVerbatimArguments: true }, base) }
-      : { cmd: ed.cli, args: [dir], opts: base };
     const chat = PLATFORM === 'darwin' ? { cmd: 'open', args: [uri], opts: base }
       : PLATFORM === 'win32' ? { cmd: 'rundll32.exe', args: ['url.dll,FileProtocolHandler', uri], opts: base }
       : { cmd: 'xdg-open', args: [uri], opts: base };
-    return Object.assign(chat, { folder: folder });
+    return Object.assign(chat, { editor: ed });
   }
   const cli = agentCli();
   if (!cli) return { none: 'this coding tool has no command to start a new session' };
@@ -649,17 +683,30 @@ function openSession(dir) {
     }
     const plan = openPlan(where);
     if (plan.none) { log('an answer waits for a new session (' + plan.none + '): the next one you start takes it'); return; }
-    if (process.env.ZOYE_OPEN_DRY === '1') {
-      const dry = { cmd: plan.cmd, args: plan.args, cwd: plan.opts.cwd || '' };
-      if (plan.folder) dry.folder = { cmd: plan.folder.cmd, args: plan.folder.args };
-      log('would open: ' + JSON.stringify(dry));
-      return;
-    }
-    const run = function (p) {
-      const child = childProcess.spawn(p.cmd, p.args, p.opts);
-      child.on('error', function (e) { log('could not open a new session: ' + e.message); }); // silent-ok - the answer still waits and the next new session takes it
-      child.unref();
-    };
+    if (!plan.editor) return go(plan, where);
+    windowFor(plan.editor, where, function (win) {
+      if (!win) { log('an answer waits for a new session (no editor window is open on ' + where + '): the next one you start takes it'); return; }
+      const ed = plan.editor, base = { detached: true, stdio: 'ignore' };
+      plan.folder = PLATFORM === 'win32'
+        ? { cmd: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', '""' + ed.cli + '" "' + win + '""'], opts: Object.assign({ windowsVerbatimArguments: true }, base) }
+        : { cmd: ed.cli, args: [win], opts: base };
+      go(plan, win);
+    });
+  } catch (e) { log('could not open a new session: ' + (e && e.message)); } // silent-ok - the answer still waits and the next new session takes it
+}
+function go(plan, where) {
+  if (process.env.ZOYE_OPEN_DRY === '1') {
+    const dry = { cmd: plan.cmd, args: plan.args, cwd: plan.opts.cwd || '' };
+    if (plan.folder) dry.folder = { cmd: plan.folder.cmd, args: plan.folder.args };
+    log('would open: ' + JSON.stringify(dry));
+    return;
+  }
+  const run = function (p) {
+    const child = childProcess.spawn(p.cmd, p.args, p.opts);
+    child.on('error', function (e) { log('could not open a new session: ' + e.message); }); // silent-ok - the answer still waits and the next new session takes it
+    child.unref();
+  };
+  try {
     if (plan.folder) { run(plan.folder); setTimeout(function () { run(plan); }, FOLDER_WAIT_MS); } else run(plan);
     log('opened a new session in ' + where + ' for a teammate answer');
   } catch (e) { log('could not open a new session: ' + (e && e.message)); } // silent-ok - the answer still waits and the next new session takes it
